@@ -1,0 +1,71 @@
+// src/ast.rs
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum Expr {
+    Number(i64),
+    Variable(String),
+    BinaryOp {
+        left: Box<Expr>,
+        op: BinaryOperator,
+        right: Box<Expr>,
+    },
+    /// Function call expression, allowing recursive calls.
+    Call {
+        name: String,
+        args: Vec<Expr>,
+    },
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum BinaryOperator {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Equal, // For comparisons (e.g., in if statements)
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum Statement {
+    /// Assignment: identifier := expression;
+    Assignment {
+        variable: String,
+        expr: Expr,
+    },
+    /// Compound statement: begin ... end
+    Compound(Vec<Statement>),
+    /// While loop: while condition do statement
+    While {
+        condition: Expr,
+        body: Box<Statement>,
+    },
+    /// Repeat loop: repeat statements until condition
+    Repeat {
+        body: Vec<Statement>,
+        condition: Expr,
+    },
+    /// If statement: if condition then statement [else statement]
+    If {
+        condition: Expr,
+        then_branch: Box<Statement>,
+        else_branch: Option<Box<Statement>>,
+    },
+    /// A procedure call (statement form)
+    ProcedureCall {
+        name: String,
+        args: Vec<Expr>,
+    },
+    /// Function declaration: function name(params) : return_type; body;
+    FunctionDecl {
+        name: String,
+        params: Vec<String>,
+        return_type: Option<String>,
+        body: Box<Statement>,
+    },
+    /// Procedure declaration: procedure name(params); body;
+    ProcedureDecl {
+        name: String,
+        params: Vec<String>,
+        body: Box<Statement>,
+    },
+}

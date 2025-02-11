@@ -1,0 +1,85 @@
+// src/main.rs
+
+use clap::Parser;
+use std::fs;
+
+mod ast;
+mod lexer;
+mod parser;
+mod interpreter;
+mod codegen;
+
+use lexer::Lexer;
+use parser::Parser as PasParser;
+use interpreter::Interpreter;
+use codegen::CodeGenerator;
+use inkwell::context::Context;
+
+#[derive(Parser)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Path to the Pascal source file.
+    file: String,
+    /// Mode: "interpret" or "compile".
+    #[arg(short, long, default_value = "interpret")]
+    mode: String,
+}
+
+fn main() {
+    let args = Args::parse();
+
+    // Read the entire source file.
+    let source = fs::read_to_string(&args.file).expect("Could not read the source file");
+
+    // Lex and parse the source.
+    let mut lexer = Lexer::new(&source);
+    let mut tokens = Vec::new();
+    loop {
+        let token = lexer.next_token();
+        tokens.push(token.clone());
+        if token == lexer::Token::EOF {
+            break;
+        }
+    }
+    let mut parser = PasParser::new(tokens);
+
+    // For simplicity, assume the source file is a sequence of top-level statements.
+    let mut statements = Vec::new();
+    while parser.peek() != &lexer::Token::EOF && parser.peek() != &lexer::Token::Dot {
+        let stmt = parser.parse_statement();
+        statements.push(stmt);
+    }
+    if parser.peek() == &lexer::Token::Dot {
+        parser.advance();
+    }
+
+    // Choose mode: interpret or compile.
+    if args.mode.to_lowercase() == "interpret" {
+        let mut interp = Interpreter::new();
+        for stmt in statements {
+            interp.execute_statement(&stmt);
+        }
+        println!("Final global state: {:#?}", interp.get_globals());
+    } else if args.mode.to_lowercase() == "compile" {
+        let context = Context::create();
+        let mut codegen = CodeGenerator::new(&context, "pascal_module");
+        // Generate code for each top-level statement.
+        // For demonstration, we assume that all function declarations
+        // are at the top level and that there is a main compound statement.
+        // You may need to refine this logic for a complete compiler.
+        for stmt in statements {
+            codegen.gen_statement(&stmt, codegen.module.get_function("main").unwrap_or_else(|| {
+                // Create a main function if it doesn't exist.
+                let fn_type = codegen.i32_type().fn_type(&[], false);
+                codegen.module.add_function("main", fn_type, None)
+            }));
+        }
+        // Finalize the module (print IR to stderr).
+        codegen.finish();
+
+        // At this point, you could write the IR to a file and use LLVM tools (llc, clang)
+        // to generate a native executable.
+    } else {
+        eprintln!("Unknown mode: {}. Use 'interpret' or 'compile'.", args.mode);
+    }
+}

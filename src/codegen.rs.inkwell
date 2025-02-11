@@ -1,0 +1,248 @@
+// src/codegen.rs
+
+use inkwell::context::Context;
+use inkwell::builder::Builder;
+use inkwell::module::Module;
+use inkwell::values::{FunctionValue, IntValue, PointerValue};
+use inkwell::types::BasicTypeEnum;
+use inkwell::IntPredicate;
+use std::collections::HashMap;
+
+use crate::ast::{Expr, Statement, BinaryOperator};
+
+/// Structure to hold code generation context.
+pub struct CodeGenerator<'ctx> {
+    pub context: &'ctx inkwell::context::Context,
+    pub module: inkwell::module::Module<'ctx>,
+    pub builder: inkwell::builder::Builder<'ctx>,
+    // Specify that each variable is a pointer to an i32 value.
+    pub variables: HashMap<String, PointerValue<'ctx, inkwell::types::IntType<'ctx>>>,
+    pub functions: HashMap<String, inkwell::values::FunctionValue<'ctx>>,
+}
+
+impl<'ctx> CodeGenerator<'ctx> {
+    /// Create a new code generator.
+    pub fn new(context: &'ctx Context, module_name: &str) -> Self {
+        let module = context.create_module(module_name);
+        let builder = context.create_builder();
+        Self {
+            context,
+            module,
+            builder,
+            variables: HashMap::new(),
+            functions: HashMap::new(),
+        }
+    }
+
+    /// Helper to get the i32 type.
+    pub fn i32_type(&self) -> inkwell::types::IntType<'ctx> {
+        self.context.i32_type()
+    }
+
+    /// Generate code for an expression.
+    pub fn gen_expr(&mut self, expr: &Expr) -> Option<IntValue<'ctx>> {
+        match expr {
+            Expr::Number(n) => Some(self.i32_type().const_int(*n as u64, false)),
+            Expr::Variable(name) => {
+                // Load the variable from its pointer.
+                if let Some(ptr) = self.variables.get(name) {
+                    //Some(self.builder.build_load(*ptr, name).into_int_value())
+                    //Some(self.builder.build_load(*ptr, name).into_int_value())
+                    Some(self.builder.build_load(*ptr, inkwell::values::PointerValue<'_> , name).into_int_value())
+                } else {
+                    None
+                }
+            },
+            Expr::BinaryOp { left, op, right } => {
+                let lhs = self.gen_expr(left)?;
+                let rhs = self.gen_expr(right)?;
+                match op {
+                    BinaryOperator::Add => Some(self.builder.build_int_add(lhs, rhs, "addtmp")),
+                    BinaryOperator::Subtract => Some(self.builder.build_int_sub(lhs, rhs, "subtmp")),
+                    BinaryOperator::Multiply => Some(self.builder.build_int_mul(lhs, rhs, "multmp")),
+                    BinaryOperator::Divide => Some(self.builder.build_int_signed_div(lhs, rhs, "divtmp")),
+                    BinaryOperator::Equal => {
+                        let cmp = self.builder.build_int_compare(IntPredicate::EQ, lhs, rhs, "eqtmp");
+                        // Convert bool (i1) to i32 (0 or 1).
+                        Some(self.builder.build_int_z_extend(cmp, self.i32_type(), "booltmp"))
+                    }
+                }
+            },
+            Expr::Call { name, args } => {
+                // Look up the function in our table.
+                if let Some(func) = self.functions.get(name) {
+                    let mut arg_vals = Vec::new();
+                    for arg in args {
+                        let val = self.gen_expr(arg)?;
+                        arg_vals.push(val.into());
+                    }
+                    let call = self.builder.build_call(*func, &arg_vals, "calltmp");
+                    Some(call.try_as_basic_value().left()?.into_int_value())
+                } else {
+                    None
+                }
+            },
+        }
+    }
+
+    /// Generate code for a statement.
+    pub fn gen_statement(&mut self, stmt: &Statement, function: FunctionValue<'ctx>) {
+        match stmt {
+            Statement::Assignment { variable, expr } => {
+                if let Some(val) = self.gen_expr(expr) {
+                    // If the variable does not exist, allocate space in the current function.
+                    let var_ptr = self.variables.entry(variable.clone()).or_insert_with(|| {
+                        self.builder.build_alloca(self.i32_type(), variable)
+                    });
+                    self.builder.build_store(*var_ptr, val);
+                }
+            },
+            Statement::Compound(stmts) => {
+                for s in stmts {
+                    self.gen_statement(s, function);
+                }
+            },
+            Statement::If { condition, then_branch, else_branch } => {
+                let cond_val = self.gen_expr(condition).expect("Failed to generate condition");
+                // Compare condition to 0 (non-zero is true)
+                let cond_bool = self.builder.build_int_compare(IntPredicate::NE, cond_val, self.i32_type().const_zero(), "ifcond");
+
+                let current_block = self.builder.get_insert_block().unwrap();
+                let parent = current_block.get_parent().unwrap();
+
+                let then_bb = self.context.append_basic_block(parent, "then");
+                let else_bb = self.context.append_basic_block(parent, "else");
+                let merge_bb = self.context.append_basic_block(parent, "ifcont");
+
+                self.builder.build_conditional_branch(cond_bool, then_bb, else_bb);
+
+                // Then block
+                self.builder.position_at_end(then_bb);
+                self.gen_statement(then_branch, function);
+                self.builder.build_unconditional_branch(merge_bb);
+                let then_bb = self.builder.get_insert_block().unwrap();
+
+                // Else block
+                self.builder.position_at_end(else_bb);
+                if let Some(else_stmt) = else_branch {
+                    self.gen_statement(else_stmt, function);
+                }
+                self.builder.build_unconditional_branch(merge_bb);
+                let else_bb = self.builder.get_insert_block().unwrap();
+
+                // Merge block
+                self.builder.position_at_end(merge_bb);
+            },
+            Statement::While { condition, body } => {
+                let parent = self.builder.get_insert_block().unwrap().get_parent().unwrap();
+                let loop_bb = self.context.append_basic_block(parent, "loop");
+                let after_bb = self.context.append_basic_block(parent, "afterloop");
+
+                // Branch to loop
+                self.builder.build_unconditional_branch(loop_bb);
+                self.builder.position_at_end(loop_bb);
+
+                let cond_val = self.gen_expr(condition).expect("Failed to generate while condition");
+                let cond_bool = self.builder.build_int_compare(IntPredicate::NE, cond_val, self.i32_type().const_zero(), "whilecond");
+
+                // Create loop body block and branch accordingly.
+                let body_bb = self.context.append_basic_block(parent, "loopbody");
+                self.builder.build_conditional_branch(cond_bool, body_bb, after_bb);
+
+                // Body
+                self.builder.position_at_end(body_bb);
+                self.gen_statement(body, function);
+                self.builder.build_unconditional_branch(loop_bb);
+
+                // After loop
+                self.builder.position_at_end(after_bb);
+            },
+            Statement::FunctionDecl { name, params, return_type: _, body } => {
+                // For a function declaration, we define an LLVM function.
+                // For simplicity, assume integer return type and all integer parameters.
+                let param_types = vec![self.i32_type().into(); params.len()];
+                let fn_type = self.i32_type().fn_type(&param_types, false);
+                let function = self.module.add_function(name, fn_type, None);
+                self.functions.insert(name.clone(), function);
+                // Create an entry block.
+                let entry_bb = self.context.append_basic_block(function, "entry");
+                self.builder.position_at_end(entry_bb);
+                // Allocate space for each parameter.
+                for (i, param) in function.get_param_iter().enumerate() {
+                    let param_name = &params[i];
+                    let alloca = self.builder.build_alloca(self.i32_type(), param_name);
+                    self.builder.build_store(alloca, param);
+                    self.variables.insert(param_name.clone(), alloca);
+                }
+                // Generate code for the function body.
+                self.gen_statement(body, function);
+                // For simplicity, assume the function’s last assignment to its name is its return value.
+                // Load the value of the function name and return it.
+                if let Some(ret_ptr) = self.variables.get(name) {
+                    //let ret_val = self.builder.build_load(*ret_ptr, "ret");
+                    let ret_val = self.builder.build_load(*ret_ptr, "ret");
+                    self.builder.build_return(Some(&ret_val));
+                } else {
+                    self.builder.build_return(Some(&self.i32_type().const_zero()));
+                }
+                // Clear variables for next functions.
+                self.variables.clear();
+            },
+            Statement::ProcedureDecl { name, params, body } => {
+                // Similar to function declaration but with void return.
+                let param_types = vec![self.i32_type().into(); params.len()];
+                let fn_type = self.context.void_type().fn_type(&param_types, false);
+                let function = self.module.add_function(name, fn_type, None);
+                self.functions.insert(name.clone(), function);
+                let entry_bb = self.context.append_basic_block(function, "entry");
+                self.builder.position_at_end(entry_bb);
+                for (i, param) in function.get_param_iter().enumerate() {
+                    let param_name = &params[i];
+                    let alloca = self.builder.build_alloca(self.i32_type(), param_name);
+                    self.builder.build_store(alloca, param);
+                    self.variables.insert(param_name.clone(), alloca);
+                }
+                self.gen_statement(body, function);
+                self.builder.build_return(None);
+                self.variables.clear();
+            },
+            Statement::ProcedureCall { name, args } => {
+                // For procedure calls, check for a built‑in procedure like writeln.
+                if name.to_lowercase() == "writeln" {
+                    // For each argument, generate code and then print via LLVM's external printf.
+                    // (In a real compiler you would link with libc.)
+                    for arg in args {
+                        if let Some(val) = self.gen_expr(arg) {
+                            // For simplicity, we print by calling a helper function.
+                            // (Here we just emit a comment—actual printing in LLVM IR requires setting up printf.)
+                            self.builder.build_call(
+                                self.module.get_function("print_int").expect("print_int not defined"),
+                                &[val.into()],
+                                "call_print_int",
+                            );
+                        }
+                    }
+                } else {
+                    // User-defined procedure call.
+                    if let Some(func) = self.functions.get(name).cloned() {
+                        let mut arg_vals = Vec::new();
+                        for arg in args {
+                            if let Some(val) = self.gen_expr(arg) {
+                                arg_vals.push(val.into());
+                            }
+                        }
+                        self.builder.build_call(func, &arg_vals, "callproc");
+                    }
+                }
+            },
+            _ => {
+                // Extend for other statements if needed.
+            },
+        }
+    }
+
+    /// Finalize and print the LLVM IR to stdout (or write to file).
+    pub fn finish(&self) {
+        self.module.print_to_stderr();
+    }
+}

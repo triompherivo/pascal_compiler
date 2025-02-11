@@ -1,0 +1,543 @@
+// src/parser.rs
+
+use crate::ast::{BinaryOperator, Expr, Statement};
+use crate::lexer::Token;
+
+pub struct Parser {
+    tokens: Vec<Token>,
+    current: usize,
+}
+
+impl Parser {
+    pub fn new(tokens: Vec<Token>) -> Self {
+        Self { tokens, current: 0 }
+    }
+
+    pub fn peek(&self) -> &Token {
+        self.tokens.get(self.current).unwrap_or(&Token::EOF)
+    }
+
+    pub fn advance(&mut self) -> &Token {
+        if self.current < self.tokens.len() {
+            self.current += 1;
+        }
+        self.tokens.get(self.current - 1).unwrap_or(&Token::EOF)
+    }
+
+    // Expect a specific token; panic if not found.
+    fn expect(&mut self, expected: &Token) {
+        let token = self.peek();
+        if token != expected {
+            panic!("Expected {:?}, found {:?}", expected, token);
+        }
+        self.advance();
+    }
+
+    // -------------------------
+    // Expression parsing routines
+    // -------------------------
+
+    /// parse_factor ::= Number | Identifier [ "(" argument_list ")" ] | "(" expression ")"
+    fn parse_factor(&mut self) -> Expr {
+        let token = self.peek().clone(); // clone to avoid borrow issues
+        match token {
+            Token::Number(n) => {
+                self.advance();
+                let value = n.parse::<i64>().expect("Invalid number");
+                Expr::Number(value)
+            }
+            Token::Identifier(name) => {
+                self.advance();
+                // Check for a function call (lookahead for LParen)
+                if self.peek() == &Token::LParen {
+                    self.advance(); // consume '('
+                    let args = self.parse_argument_list();
+                    self.expect(&Token::RParen);
+                    Expr::Call { name, args }
+                } else {
+                    Expr::Variable(name)
+                }
+            }
+            Token::LParen => {
+                self.advance(); // consume '('
+                let expr = self.parse_expression();
+                self.expect(&Token::RParen);
+                expr
+            }
+            _ => panic!("Unexpected token in factor: {:?}", token),
+        }
+    }
+
+    /// parse_term ::= factor ( ("*" | "/") factor )*
+    fn parse_term(&mut self) -> Expr {
+        let mut expr = self.parse_factor();
+        loop {
+            match self.peek() {
+                Token::Star => {
+                    self.advance();
+                    let right = self.parse_factor();
+                    expr = Expr::BinaryOp {
+                        left: Box::new(expr),
+                        op: BinaryOperator::Multiply,
+                        right: Box::new(right),
+                    }
+                }
+                Token::Slash => {
+                    self.advance();
+                    let right = self.parse_factor();
+                    expr = Expr::BinaryOp {
+                        left: Box::new(expr),
+                        op: BinaryOperator::Divide,
+                        right: Box::new(right),
+                    }
+                }
+                _ => break,
+            }
+        }
+        expr
+    }
+
+    /// parse_expression ::= term ( ("+" | "-" | "=") term )*
+    pub fn parse_expression(&mut self) -> Expr {
+        let mut expr = self.parse_term();
+        loop {
+            match self.peek() {
+                Token::Plus => {
+                    self.advance();
+                    let right = self.parse_term();
+                    expr = Expr::BinaryOp {
+                        left: Box::new(expr),
+                        op: BinaryOperator::Add,
+                        right: Box::new(right),
+                    }
+                }
+                Token::Minus => {
+                    self.advance();
+                    let right = self.parse_term();
+                    expr = Expr::BinaryOp {
+                        left: Box::new(expr),
+                        op: BinaryOperator::Subtract,
+                        right: Box::new(right),
+                    }
+                }
+                Token::Equal => {
+                    self.advance();
+                    let right = self.parse_term();
+                    expr = Expr::BinaryOp {
+                        left: Box::new(expr),
+                        op: BinaryOperator::Equal,
+                        right: Box::new(right),
+                    }
+                }
+                _ => break,
+            }
+        }
+        expr
+    }
+
+    /// parse_argument_list ::= [ expression ("," expression)* ]
+    fn parse_argument_list(&mut self) -> Vec<Expr> {
+        let mut args = Vec::new();
+        if self.peek() == &Token::RParen {
+            return args;
+        }
+        args.push(self.parse_expression());
+        while self.peek() == &Token::Comma {
+            self.advance();
+            args.push(self.parse_expression());
+        }
+        args
+    }
+
+    // -------------------------
+    // Statement parsing routines
+    // -------------------------
+
+    /// When a statement starts with an identifier, decide whether it’s an assignment or a procedure call.
+    fn parse_identifier_statement(&mut self) -> Statement {
+        let name = if let Token::Identifier(name) = self.advance().clone() {
+            name
+        } else {
+            panic!("Expected identifier");
+        };
+        match self.peek() {
+            Token::ColonEqual => {
+                self.advance(); // consume :=
+                let expr = self.parse_expression();
+                Statement::Assignment { variable: name, expr }
+            }
+            Token::LParen => {
+                self.advance(); // consume '('
+                let args = self.parse_argument_list();
+                self.expect(&Token::RParen);
+                Statement::ProcedureCall { name, args }
+            }
+            _ => {
+                // If neither assignment nor a call with arguments, assume a procedure call with no arguments.
+                Statement::ProcedureCall {
+                    name,
+                    args: Vec::new(),
+                }
+            }
+        }
+    }
+
+    /// parse_compound ::= "begin" statement_list "end"
+    fn parse_compound(&mut self) -> Statement {
+        self.expect(&Token::Begin);
+        let mut stmts = Vec::new();
+        while self.peek() != &Token::End {
+            stmts.push(self.parse_statement());
+            if self.peek() == &Token::Semicolon {
+                self.advance();
+            }
+        }
+        self.expect(&Token::End);
+        Statement::Compound(stmts)
+    }
+
+    /// parse_while ::= "while" expression "do" statement
+    fn parse_while(&mut self) -> Statement {
+        self.expect(&Token::While);
+        let condition = self.parse_expression();
+        self.expect(&Token::Do);
+        let body = self.parse_statement();
+        Statement::While {
+            condition,
+            body: Box::new(body),
+        }
+    }
+
+    /// parse_repeat ::= "repeat" statement_list "until" expression
+    fn parse_repeat(&mut self) -> Statement {
+        self.expect(&Token::Repeat);
+        let mut stmts = Vec::new();
+        while self.peek() != &Token::Until {
+            stmts.push(self.parse_statement());
+            if self.peek() == &Token::Semicolon {
+                self.advance();
+            }
+        }
+        self.expect(&Token::Until);
+        let condition = self.parse_expression();
+        Statement::Repeat { body: stmts, condition }
+    }
+
+    /// parse_if ::= "if" expression "then" statement [ "else" statement ]
+    fn parse_if(&mut self) -> Statement {
+        self.expect(&Token::If);
+        let condition = self.parse_expression();
+        self.expect(&Token::Then);
+        let then_branch = self.parse_statement();
+        let else_branch = if self.peek() == &Token::Else {
+            self.advance();
+            Some(Box::new(self.parse_statement()))
+        } else {
+            None
+        };
+        Statement::If {
+            condition,
+            then_branch: Box::new(then_branch),
+            else_branch,
+        }
+    }
+
+    /// parse_function_decl ::= "function" identifier [ "(" param_list ")" ] ":" identifier ";" compound ";" 
+    fn parse_function_decl(&mut self) -> Statement {
+        self.expect(&Token::Function);
+        let name = if let Token::Identifier(name) = self.advance().clone() {
+            name
+        } else {
+            panic!("Expected function name");
+        };
+        let params = if self.peek() == &Token::LParen {
+            self.parse_param_list()
+        } else {
+            Vec::new()
+        };
+        self.expect(&Token::Colon);
+        let return_type = if let Token::Identifier(t) = self.advance().clone() {
+            t
+        } else {
+            panic!("Expected return type");
+        };
+        self.expect(&Token::Semicolon);
+        let body = self.parse_compound();
+        self.expect(&Token::Semicolon);
+        Statement::FunctionDecl {
+            name,
+            params,
+            return_type: Some(return_type),
+            body: Box::new(body),
+        }
+    }
+
+    /// parse_procedure_decl ::= "procedure" identifier [ "(" param_list ")" ] ";" compound ";" 
+    fn parse_procedure_decl(&mut self) -> Statement {
+        self.expect(&Token::Procedure);
+        let name = if let Token::Identifier(name) = self.advance().clone() {
+            name
+        } else {
+            panic!("Expected procedure name");
+        };
+        let params = if self.peek() == &Token::LParen {
+            self.parse_param_list()
+        } else {
+            Vec::new()
+        };
+        self.expect(&Token::Semicolon);
+        let body = self.parse_compound();
+        self.expect(&Token::Semicolon);
+        Statement::ProcedureDecl {
+            name,
+            params,
+            body: Box::new(body),
+        }
+    }
+
+    /// parse_param_list ::= "(" identifier { "," identifier } ")"
+    pub fn parse_param_list(&mut self) -> Vec<String> {
+        let mut params = Vec::new();
+        self.expect(&Token::LParen); // consume '('
+    
+        if self.peek() != &Token::RParen {
+            // Parse first parameter.
+            if let Token::Identifier(name) = self.advance().clone() {
+                params.push(name);
+                // Optionally skip type annotation.
+                if self.peek() == &Token::Colon {
+                    self.advance(); // consume ':'
+                    // For now, assume the type is an identifier and skip it.
+                    if let Token::Identifier(_type_name) = self.advance().clone() {
+                        // We ignore the type.
+                    } else {
+                        panic!("Expected type name after ':' in parameter list");
+                    }
+                }
+            } else {
+                panic!("Expected parameter name");
+            }
+    
+            // Parse additional parameters if separated by commas.
+            while self.peek() == &Token::Comma {
+                self.advance(); // consume comma
+                if let Token::Identifier(name) = self.advance().clone() {
+                    params.push(name);
+                    if self.peek() == &Token::Colon {
+                        self.advance(); // consume ':'
+                        if let Token::Identifier(_type_name) = self.advance().clone() {
+                            // ignore type name
+                        } else {
+                            panic!("Expected type name after ':' in parameter list");
+                        }
+                    }
+                } else {
+                    panic!("Expected parameter name after comma");
+                }
+            }
+        }
+        self.expect(&Token::RParen); // finally, expect the closing ')'
+        params
+    }
+    /// parse_statement:
+    ///   statement ::= identifier_statement | compound | while | repeat | if | procedure_decl | function_decl
+    pub fn parse_statement(&mut self) -> Statement {
+        match self.peek() {
+            Token::Identifier(_) => self.parse_identifier_statement(),
+            Token::Begin => self.parse_compound(),
+            Token::While => self.parse_while(),
+            Token::Repeat => self.parse_repeat(),
+            Token::If => self.parse_if(),
+            Token::Procedure => self.parse_procedure_decl(),
+            Token::Function => self.parse_function_decl(),
+            token => panic!("Unexpected token in statement: {:?}", token),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::{BinaryOperator, Expr, Statement};
+    use crate::lexer::Lexer;
+
+    // Helper: lex the entire input into a vector of tokens.
+    fn lex_all(input: &str) -> Vec<Token> {
+        let mut lexer = Lexer::new(input);
+        let mut tokens = Vec::new();
+        loop {
+            let token = lexer.next_token();
+            tokens.push(token.clone());
+            if token == Token::EOF {
+                break;
+            }
+        }
+        tokens
+    }
+
+    #[test]
+    fn test_parse_simple_expression() {
+        // Expression: 2 + 3 * 4  ==> 2 + (3 * 4)
+        let input = "2+3*4";
+        let tokens = lex_all(input);
+        let mut parser = Parser::new(tokens);
+        let expr = parser.parse_expression();
+        let expected = Expr::BinaryOp {
+            left: Box::new(Expr::Number(2)),
+            op: BinaryOperator::Add,
+            right: Box::new(Expr::BinaryOp {
+                left: Box::new(Expr::Number(3)),
+                op: BinaryOperator::Multiply,
+                right: Box::new(Expr::Number(4)),
+            }),
+        };
+        assert_eq!(expr, expected);
+    }
+
+    #[test]
+    fn test_parse_assignment() {
+        // x := 10 - 3;
+        let input = "x:=10-3";
+        let tokens = lex_all(input);
+        let mut parser = Parser::new(tokens);
+        let stmt = parser.parse_statement();
+        let expected = Statement::Assignment {
+            variable: "x".to_string(),
+            expr: Expr::BinaryOp {
+                left: Box::new(Expr::Number(10)),
+                op: BinaryOperator::Subtract,
+                right: Box::new(Expr::Number(3)),
+            },
+        };
+        assert_eq!(stmt, expected);
+    }
+
+    #[test]
+    fn test_parse_compound_statement() {
+        // Compound: begin x := 1; y := 2 end
+        let input = "begin x:=1; y:=2 end";
+        let tokens = lex_all(input);
+        let mut parser = Parser::new(tokens);
+        let stmt = parser.parse_statement();
+        let expected = Statement::Compound(vec![
+            Statement::Assignment {
+                variable: "x".to_string(),
+                expr: Expr::Number(1),
+            },
+            Statement::Assignment {
+                variable: "y".to_string(),
+                expr: Expr::Number(2),
+            },
+        ]);
+        assert_eq!(stmt, expected);
+    }
+
+    #[test]
+    fn test_parse_while_statement() {
+        // while x = 0 do x := x + 1
+        let input = "while x=0 do x:=x+1";
+        let tokens = lex_all(input);
+        let mut parser = Parser::new(tokens);
+        let stmt = parser.parse_statement();
+        let expected = Statement::While {
+            condition: Expr::BinaryOp {
+                left: Box::new(Expr::Variable("x".to_string())),
+                op: BinaryOperator::Equal,
+                right: Box::new(Expr::Number(0)),
+            },
+            body: Box::new(Statement::Assignment {
+                variable: "x".to_string(),
+                expr: Expr::BinaryOp {
+                    left: Box::new(Expr::Variable("x".to_string())),
+                    op: BinaryOperator::Add,
+                    right: Box::new(Expr::Number(1)),
+                },
+            }),
+        };
+        assert_eq!(stmt, expected);
+    }
+
+    #[test]
+    fn test_parse_repeat_statement() {
+        // repeat x:=x-1 until x=0
+        let input = "repeat x:=x-1 until x=0";
+        let tokens = lex_all(input);
+        let mut parser = Parser::new(tokens);
+        let stmt = parser.parse_statement();
+        let expected = Statement::Repeat {
+            body: vec![Statement::Assignment {
+                variable: "x".to_string(),
+                expr: Expr::BinaryOp {
+                    left: Box::new(Expr::Variable("x".to_string())),
+                    op: BinaryOperator::Subtract,
+                    right: Box::new(Expr::Number(1)),
+                },
+            }],
+            condition: Expr::BinaryOp {
+                left: Box::new(Expr::Variable("x".to_string())),
+                op: BinaryOperator::Equal,
+                right: Box::new(Expr::Number(0)),
+            },
+        };
+        assert_eq!(stmt, expected);
+    }
+
+    #[test]
+    fn test_parse_if_statement() {
+        // if x=0 then x:=1 else x:=2
+        let input = "if x=0 then x:=1 else x:=2";
+        let tokens = lex_all(input);
+        let mut parser = Parser::new(tokens);
+        let stmt = parser.parse_statement();
+        let expected = Statement::If {
+            condition: Expr::BinaryOp {
+                left: Box::new(Expr::Variable("x".to_string())),
+                op: BinaryOperator::Equal,
+                right: Box::new(Expr::Number(0)),
+            },
+            then_branch: Box::new(Statement::Assignment {
+                variable: "x".to_string(),
+                expr: Expr::Number(1),
+            }),
+            else_branch: Some(Box::new(Statement::Assignment {
+                variable: "x".to_string(),
+                expr: Expr::Number(2),
+            })),
+        };
+        assert_eq!(stmt, expected);
+    }
+
+    #[test]
+    fn test_parse_function_decl() {
+        // function fact(n) : integer; begin if n=0 then begin fact:=1 end else begin fact:= n * fact(n-1) end; end;
+        let input = "function fact(n) : integer; begin if n=0 then begin fact:=1 end else begin fact:= n*fact(n-1) end end;";
+        let tokens = lex_all(input);
+        let mut parser = Parser::new(tokens);
+        let stmt = parser.parse_statement();
+        // We simply test that a FunctionDecl is produced with the correct name and parameter list.
+        if let Statement::FunctionDecl { name, params, return_type, .. } = stmt {
+            assert_eq!(name, "fact");
+            assert_eq!(params, vec!["n"]);
+            assert_eq!(return_type, Some("integer".to_string()));
+        } else {
+            panic!("Expected a function declaration");
+        }
+    }
+
+    #[test]
+    #[test]
+fn test_parse_procedure_decl() {
+    // procedure print(x); begin end;
+    let input = "procedure print(x); begin end;";
+    let tokens = lex_all(input);
+    let mut parser = Parser::new(tokens);
+    let stmt = parser.parse_statement();
+    if let Statement::ProcedureDecl { name, params, .. } = stmt {
+        assert_eq!(name, "print");
+        assert_eq!(params, vec!["x"]);
+    } else {
+        panic!("Expected a procedure declaration");
+    }
+}
+
+}

@@ -1,0 +1,247 @@
+// src/lexer.rs
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum Token {
+    // Keywords
+    Program,
+    Var,
+    Begin,
+    End,
+    While,
+    Do,
+    Repeat,
+    Until,
+    If,
+    Then,
+    Else,
+    Procedure,
+    Function,
+
+    // Identifiers and literals
+    Identifier(String),
+    Number(String), // We'll parse to i64 later
+
+    // Operators and punctuation
+    Plus,       // +
+    Minus,      // -
+    Star,       // *
+    Slash,      // /
+    Colon,      // :
+    Semicolon,  // ;
+    Comma,      // ,
+    Dot,        // .
+    ColonEqual, // :=
+    LParen,     // (
+    RParen,     // )
+    Equal,      // = (for comparison)
+    // Add more as needed...
+
+    // End-of-file marker
+    EOF,
+}
+
+pub struct Lexer {
+    source: Vec<char>,
+    position: usize,
+}
+
+impl Lexer {
+    pub fn new(input: &str) -> Self {
+        Self {
+            source: input.chars().collect(),
+            position: 0,
+        }
+    }
+
+    // Return the current character (if any)
+    fn current_char(&self) -> Option<char> {
+        self.source.get(self.position).cloned()
+    }
+
+    // Consume and return the current character
+    fn advance(&mut self) -> Option<char> {
+        let ch = self.current_char();
+        self.position += 1;
+        ch
+    }
+
+    // Skip over whitespace
+    fn skip_whitespace(&mut self) {
+        while let Some(ch) = self.current_char() {
+            if ch.is_whitespace() {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Get the next token from the input.
+    pub fn next_token(&mut self) -> Token {
+        self.skip_whitespace();
+
+        match self.current_char() {
+            Some(ch) if ch.is_digit(10) => self.number(),
+            Some(ch) if ch.is_alphabetic() => self.identifier_or_keyword(),
+            Some(':') => {
+                self.advance();
+                if self.current_char() == Some('=') {
+                    self.advance();
+                    Token::ColonEqual
+                } else {
+                    Token::Colon
+                }
+            }
+            Some('+') => {
+                self.advance();
+                Token::Plus
+            }
+            Some('-') => {
+                self.advance();
+                Token::Minus
+            }
+            Some('*') => {
+                self.advance();
+                Token::Star
+            }
+            Some('/') => {
+                self.advance(); // consume the first '/'
+                // Check if the next character is also '/' indicating a comment.
+                if self.current_char() == Some('/') {
+                    // Skip until the end of the line.
+                    while let Some(ch) = self.current_char() {
+                        if ch == '\n' {
+                            break;
+                        }
+                        self.advance();
+                    }
+                    // After skipping the comment, skip any whitespace and then get the next token.
+                    return self.next_token();
+                } else {
+                    // Not a comment, so return a Slash operator.
+                    Token::Slash
+                }
+            }
+            Some(';') => {
+                self.advance();
+                Token::Semicolon
+            }
+            Some(',') => {
+                self.advance();
+                Token::Comma
+            }
+            Some('.') => {
+                self.advance();
+                Token::Dot
+            }
+            Some('(') => {
+                self.advance();
+                Token::LParen
+            }
+            Some(')') => {
+                self.advance();
+                Token::RParen
+            }
+            Some('=') => {
+                self.advance();
+                Token::Equal
+            }
+            Some(ch) => {
+                self.advance();
+                panic!("Unexpected character: {}", ch);
+            }
+            None => Token::EOF,
+        }
+    }
+
+    fn number(&mut self) -> Token {
+        let mut num_str = String::new();
+        while let Some(ch) = self.current_char() {
+            if ch.is_digit(10) {
+                num_str.push(ch);
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        Token::Number(num_str)
+    }
+
+    fn identifier_or_keyword(&mut self) -> Token {
+        let mut ident = String::new();
+        while let Some(ch) = self.current_char() {
+            if ch.is_alphanumeric() {
+                ident.push(ch);
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        // Match keywords (case-insensitive)
+        match ident.to_lowercase().as_str() {
+            "program" => Token::Program,
+            "var" => Token::Var,
+            "begin" => Token::Begin,
+            "end" => Token::End,
+            "while" => Token::While,
+            "do" => Token::Do,
+            "repeat" => Token::Repeat,
+            "until" => Token::Until,
+            "if" => Token::If,
+            "then" => Token::Then,
+            "else" => Token::Else,
+            "procedure" => Token::Procedure,
+            "function" => Token::Function,
+            _ => Token::Identifier(ident),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_number() {
+        let mut lexer = Lexer::new("12345");
+        assert_eq!(lexer.next_token(), Token::Number("12345".to_string()));
+        assert_eq!(lexer.next_token(), Token::EOF);
+    }
+
+    #[test]
+    fn test_identifier_and_keywords() {
+        let mut lexer = Lexer::new("program var begin end while do repeat until if then else procedure function");
+        assert_eq!(lexer.next_token(), Token::Program);
+        assert_eq!(lexer.next_token(), Token::Var);
+        assert_eq!(lexer.next_token(), Token::Begin);
+        assert_eq!(lexer.next_token(), Token::End);
+        assert_eq!(lexer.next_token(), Token::While);
+        assert_eq!(lexer.next_token(), Token::Do);
+        assert_eq!(lexer.next_token(), Token::Repeat);
+        assert_eq!(lexer.next_token(), Token::Until);
+        assert_eq!(lexer.next_token(), Token::If);
+        assert_eq!(lexer.next_token(), Token::Then);
+        assert_eq!(lexer.next_token(), Token::Else);
+        assert_eq!(lexer.next_token(), Token::Procedure);
+        assert_eq!(lexer.next_token(), Token::Function);
+        assert_eq!(lexer.next_token(), Token::EOF);
+    }
+
+    #[test]
+    fn test_operators_and_punctuation() {
+        let mut lexer = Lexer::new("+-*/:=;,().=");
+        // Token stream: +, -, *, /, :=, ;, ,, (, ), ., =
+        assert_eq!(lexer.next_token(), Token::Plus);
+        assert_eq!(lexer.next_token(), Token::Minus);
+        assert_eq!(lexer.next_token(), Token::Star);
+        assert_eq!(lexer.next_token(), Token::Slash);
+        assert_eq!(lexer.next_token(), Token::ColonEqual);
+        assert_eq!(lexer.next_token(), Token::Semicolon);
+        assert_eq!(lexer.next_token(), Token::Comma);
+        assert_eq!(lexer.next_token(), Token::LParen);
+        assert_eq!(lexer.next_token(), Token::RParen);
+        assert_eq!(lexer.next_token(), Token::Dot);
+        assert_eq!(lexer.next_token(), Token::Equal);
+        assert_eq!(lexer.next_token(), Token::EOF);
+    }
+}

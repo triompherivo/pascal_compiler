@@ -1,0 +1,57 @@
+// src/main.rs
+
+use clap::Parser;
+use std::fs;
+
+mod ast;
+mod lexer;
+mod parser;
+mod interpreter;
+
+use lexer::Lexer;
+use parser::Parser as PasParser;
+use interpreter::Interpreter;
+
+#[derive(Parser)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Path to the Pascal source file
+    file: String,
+}
+
+fn main() {
+    let args = Args::parse();
+
+    // Read the entire source file.
+    let source = fs::read_to_string(&args.file)
+        .expect("Could not read the source file");
+
+    // Lex the input.
+    let mut lexer = Lexer::new(&source);
+    let mut tokens = Vec::new();
+    loop {
+        let token = lexer.next_token();
+        tokens.push(token.clone());
+        if token == lexer::Token::EOF {
+            break;
+        }
+    }
+
+    // Create a parser.
+    let mut parser = PasParser::new(tokens);
+
+    // Create an interpreter.
+    let mut interp = Interpreter::new();
+
+    // Parse and execute top-level statements until we hit a Dot or EOF.
+    while parser.peek() != &lexer::Token::EOF && parser.peek() != &lexer::Token::Dot {
+        let stmt = parser.parse_statement();
+        interp.execute_statement(&stmt);
+    }
+    // If there's a terminating Dot, consume it.
+    if parser.peek() == &lexer::Token::Dot {
+        parser.advance();
+    }
+
+    println!("Final global state: {:#?}", interp.get_globals());
+}

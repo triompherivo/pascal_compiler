@@ -1,0 +1,250 @@
+// src/codegen.rs
+
+use crate::ast::{Expr, Statement, BinaryOperator};
+
+/// A very simple set of instructions for our stack-based VM.
+#[derive(Debug, Clone)]
+pub enum Instruction {
+    Push(i64),            // push a literal integer onto the stack
+    Load(String),         // push the value of a variable onto the stack
+    Store(String),        // pop the top of the stack into a variable
+    Add,                  // pop two integers, add, push result
+    Sub,                  // subtract
+    Mul,                  // multiply
+    Div,                  // divide
+    Jump(usize),          // unconditional jump to instruction index
+    JumpIfFalse(usize),   // pop top of stack; if zero, jump to index
+}
+
+/// Generate instructions from an expression.
+fn gen_expr(expr: &Expr, code: &mut Vec<Instruction>) {
+    match expr {
+        Expr::Number(n) => {
+            code.push(Instruction::Push(*n));
+        },
+        Expr::Variable(name) => {
+            code.push(Instruction::Load(name.clone()));
+        },
+        Expr::BinaryOp { left, op, right } => {
+            gen_expr(left, code);
+            gen_expr(right, code);
+            match op {
+                BinaryOperator::Add => code.push(Instruction::Add),
+                BinaryOperator::Subtract => code.push(Instruction::Sub),
+                BinaryOperator::Multiply => code.push(Instruction::Mul),
+                BinaryOperator::Divide => code.push(Instruction::Div),
+                // For equality we simulate a comparison:
+                BinaryOperator::Equal => {
+                    // Here we simply subtract; a zero result means equality.
+                    code.push(Instruction::Sub);
+                },
+            }
+        },
+        // For calls we leave a stub.
+        Expr::Call { name, args } => {
+            // Not implemented here.
+            println!("Codegen: function call {} with args {:?}", name, args);
+        },
+    }
+}
+
+/// Generate instructions from a statement.
+fn gen_statement(stmt: &Statement, code: &mut Vec<Instruction>) {
+    match stmt {
+        Statement::Assignment { variable, expr } => {
+            gen_expr(expr, code);
+            code.push(Instruction::Store(variable.clone()));
+        },
+        Statement::Compound(stmts) => {
+            for s in stmts {
+                gen_statement(s, code);
+            }
+        },
+        Statement::While { condition, body } => {
+            let start = code.len();
+            gen_expr(condition, code);
+            // Placeholder for jump if false.
+            code.push(Instruction::JumpIfFalse(0));
+            let jmp_false_index = code.len() - 1;
+            gen_statement(body, code);
+            // Jump back to start.
+            code.push(Instruction::Jump(start));
+            let end = code.len();
+            // Fix up the jump-if-false address.
+            if let Instruction::JumpIfFalse(ref mut addr) = code[jmp_false_index] {
+                *addr = end;
+            }
+        },
+        Statement::If { condition, then_branch, else_branch } => {
+            gen_expr(condition, code);
+            code.push(Instruction::JumpIfFalse(0));
+            let jif_index = code.len() - 1;
+            gen_statement(then_branch, code);
+            if let Some(else_stmt) = else_branch {
+                code.push(Instruction::Jump(0));
+                let jmp_index = code.len() - 1;
+                let then_end = code.len();
+                if let Instruction::JumpIfFalse(ref mut addr) = code[jif_index] {
+                    *addr = then_end;
+                }
+                gen_statement(else_stmt, code);
+                let end = code.len();
+                if let Instruction::Jump(ref mut addr) = code[jmp_index] {
+                    *addr = end;
+                }
+            } else {
+                let end = code.len();
+                if let Instruction::JumpIfFalse(ref mut addr) = code[jif_index] {
+                    *addr = end;
+                }
+            }
+        },
+        _ => {
+            // For other statements (loops, declarations, etc.) you could extend here.
+            println!("Codegen: Statement not implemented in code generation: {:?}", stmt);
+        },
+    }
+}
+
+/// Public function to generate code from a statement.
+pub fn generate_code(stmt: &Statement) -> Vec<Instruction> {
+    let mut code = Vec::new();
+    gen_statement(stmt, &mut code);
+    code
+}
+
+/// A simple stack-based virtual machine.
+pub struct VM {
+    /// The list of instructions.
+    code: Vec<Instruction>,
+    /// Instruction pointer.
+    ip: usize,
+    /// The stack.
+    stack: Vec<i64>,
+    /// A simple memory mapping variable names to integer values.
+    pub memory: std::collections::HashMap<String, i64>,
+}
+
+impl VM {
+    /// Create a new VM with the given code.
+    pub fn new(code: Vec<Instruction>) -> Self {
+        VM {
+            code,
+            ip: 0,
+            stack: Vec::new(),
+            memory: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Run the program until completion.
+    pub fn run(&mut self) {
+        while self.ip < self.code.len() {
+            match self.code[self.ip].clone() {
+                Instruction::Push(n) => {
+                    self.stack.push(n);
+                    self.ip += 1;
+                },
+                Instruction::Load(var) => {
+                    let val = *self.memory.get(&var).unwrap_or(&0);
+                    self.stack.push(val);
+                    self.ip += 1;
+                },
+                Instruction::Store(var) => {
+                    let val = self.stack.pop().expect("Stack underflow on STORE");
+                    self.memory.insert(var, val);
+                    self.ip += 1;
+                },
+                Instruction::Add => {
+                    let b = self.stack.pop().expect("Stack underflow on ADD");
+                    let a = self.stack.pop().expect("Stack underflow on ADD");
+                    self.stack.push(a + b);
+                    self.ip += 1;
+                },
+                Instruction::Sub => {
+                    let b = self.stack.pop().expect("Stack underflow on SUB");
+                    let a = self.stack.pop().expect("Stack underflow on SUB");
+                    self.stack.push(a - b);
+                    self.ip += 1;
+                },
+                Instruction::Mul => {
+                    let b = self.stack.pop().expect("Stack underflow on MUL");
+                    let a = self.stack.pop().expect("Stack underflow on MUL");
+                    self.stack.push(a * b);
+                    self.ip += 1;
+                },
+                Instruction::Div => {
+                    let b = self.stack.pop().expect("Stack underflow on DIV");
+                    let a = self.stack.pop().expect("Stack underflow on DIV");
+                    self.stack.push(a / b);
+                    self.ip += 1;
+                },
+                Instruction::Jump(addr) => {
+                    self.ip = addr;
+                },
+                Instruction::JumpIfFalse(addr) => {
+                    let cond = self.stack.pop().expect("Stack underflow on JumpIfFalse");
+                    if cond == 0 {
+                        self.ip = addr;
+                    } else {
+                        self.ip += 1;
+                    }
+                },
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::{Expr, Statement, BinaryOperator};
+
+    #[test]
+    fn test_codegen_assignment() {
+        // x := 1 + 2;
+        let stmt = Statement::Assignment {
+            variable: "x".to_string(),
+            expr: Expr::BinaryOp {
+                left: Box::new(Expr::Number(1)),
+                op: BinaryOperator::Add,
+                right: Box::new(Expr::Number(2)),
+            },
+        };
+        let code = generate_code(&stmt);
+        // Expected code:
+        // Push 1; Push 2; Add; Store "x"
+        let expected = vec![
+            Instruction::Push(1),
+            Instruction::Push(2),
+            Instruction::Add,
+            Instruction::Store("x".to_string()),
+        ];
+        assert_eq!(code, expected);
+    }
+
+    #[test]
+    fn test_vm_execution() {
+        // Program: x := 3; while x do x := x - 1;
+        let compound = Statement::Compound(vec![
+            Statement::Assignment {
+                variable: "x".to_string(),
+                expr: Expr::Number(3),
+            },
+            Statement::While {
+                condition: Expr::Variable("x".to_string()),
+                body: Box::new(Statement::Assignment {
+                    variable: "x".to_string(),
+                    expr: Expr::BinaryOp {
+                        left: Box::new(Expr::Variable("x".to_string())),
+                        op: BinaryOperator::Subtract,
+                        right: Box::new(Expr::Number(1)),
+                    },
+                }),
+            },
+        ]);
+        let code = generate_code(&compound);
+        let mut vm = VM::new(code);
+        vm.run();
+        assert_eq!(vm.memory.get("x"), Some(&0));
+    }
+}
