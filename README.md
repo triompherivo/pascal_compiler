@@ -7,6 +7,9 @@ and last but not least recursion
 
 I deleted all my repositories in order to upload these kind of projects generated in cooperation with AI
 
+![CleanShot 2025-02-12 at 10 32 34](https://github.com/user-attachments/assets/562bb762-9b7c-4daf-9ac3-3b4d9d15f59b)
+
+
 here is an example of complex pascal program handled by my compiler
 
 COMMAND: cargo run --release -- example.pas --mode compile --verbose
@@ -75,4 +78,9 @@ begin
     writeln("Writing to file...");
     fwrite(fopen("output.txt", "w"), "Complex program complete.");
 end.
+.
 
+    
+    
+    
+    
